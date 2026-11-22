@@ -37,10 +37,16 @@ def init_db():
             CREATE TABLE IF NOT EXISTS rooms (
                 code TEXT PRIMARY KEY,
                 hero_id TEXT NOT NULL,
+                card_id TEXT,
                 created_at TEXT NOT NULL
             )
             """
         )
+        # Migrazione sicura se la tabella rooms esisteva già senza card_id
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
+        if "card_id" not in cols:
+            conn.execute("ALTER TABLE rooms ADD COLUMN card_id TEXT")
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS cards (
@@ -122,7 +128,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Aether-Core API", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Aether-Core API", version="1.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -142,6 +148,7 @@ app.add_middleware(
 class RoomCreate(BaseModel):
     code: str = Field(..., min_length=3, max_length=16)
     heroId: str = Field(..., min_length=2, max_length=40)
+    cardId: str | None = None
 
 
 class DuelResult(BaseModel):
@@ -175,22 +182,24 @@ def health():
 def create_or_update_room(payload: RoomCreate):
     code = payload.code.strip().upper()
     hero_id = payload.heroId.strip().lower()
+    card_id = payload.cardId.strip().upper() if payload.cardId else None
     now = datetime.now(timezone.utc).isoformat()
 
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO rooms (code, hero_id, created_at)
-            VALUES (?, ?, ?)
+            INSERT INTO rooms (code, hero_id, card_id, created_at)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(code) DO UPDATE SET
                 hero_id = excluded.hero_id,
+                card_id = excluded.card_id,
                 created_at = excluded.created_at
             """,
-            (code, hero_id, now),
+            (code, hero_id, card_id, now),
         )
         conn.commit()
 
-    return {"ok": True, "code": code, "heroId": hero_id}
+    return {"ok": True, "code": code, "heroId": hero_id, "cardId": card_id}
 
 
 @app.get("/api/rooms/{code}")
@@ -198,7 +207,7 @@ def get_room(code: str):
     clean_code = code.strip().upper()
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT code, hero_id, created_at FROM rooms WHERE code = ?",
+            "SELECT code, hero_id, card_id, created_at FROM rooms WHERE code = ?",
             (clean_code,),
         ).fetchone()
 
@@ -208,6 +217,7 @@ def get_room(code: str):
     return {
         "code": row["code"],
         "heroId": row["hero_id"],
+        "cardId": row["card_id"],
         "createdAt": row["created_at"],
     }
 
@@ -220,13 +230,12 @@ def save_room_duel(code: str, payload: DuelResult):
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT OR IGNORE INTO rooms (code, hero_id, created_at)
-            VALUES (?, ?, ?)
+            INSERT OR IGNORE INTO rooms (code, hero_id, card_id, created_at)
+            VALUES (?, ?, ?, ?)
             """,
-            (clean_code, payload.p1.lower(), payload.timestamp),
+            (clean_code, payload.p1.lower(), payload.p1CardId, payload.timestamp),
         )
 
-        # Aggiorna XP delle card collegate, se presenti
         for cid, hid, xp_amt in [
             (payload.p1CardId, payload.p1, 40 if payload.winner.lower() == payload.p1.lower() else 15),
             (payload.p2CardId, payload.p2, 40 if payload.winner.lower() == payload.p2.lower() else 15),
